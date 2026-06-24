@@ -1,0 +1,15 @@
+.error_message {
+  font-size: 12px;
+  color: red;
+}
+
+.alert_message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background-color: rgba(255, 242, 126, 0.04);
+  padding: 16px;
+  justify-content: center;
+  border-radius: 4px;
+  color: rgba(255, 242, 126, 1);
+}
