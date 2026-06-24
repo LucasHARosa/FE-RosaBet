@@ -847,3 +847,375 @@ alembic upgrade head
 
 uvicorn app.main:app --reload
 ```
+
+---
+
+## Fases de Implementação
+
+O projeto `BE-RosaBet` já tem a estrutura de pastas criada. As fases abaixo seguem a ordem em que cada parte pode ser desenvolvida e testada de forma independente.
+
+---
+
+### Fase 1 — Setup (concluída)
+
+- [x] Estrutura de pastas criada (`api/`, `worker/`, `application/`, `domain/`, `infrastructure/`, `tests/`)
+- [x] `requirements.txt` gerado
+- [x] `.gitignore` criado
+- [ ] Subir no GitHub com `gh repo create`
+
+---
+
+### Fase 2 — Config + Banco de dados
+
+**Objetivo:** conectar no PostgreSQL e ter as tabelas criadas via Alembic.
+
+**Arquivos a criar:**
+
+`config.py`
+```python
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    DATABASE_URL: str
+    SECRET_KEY: str
+    REDIS_URL: str = "redis://localhost:6379"
+    ENVIRONMENT: str = "development"
+    ODDS_UPDATE_INTERVAL_SECONDS: int = 5
+    RESULT_DELAY_MINUTES: int = 90
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+```
+
+`infrastructure/database/base.py`
+```python
+from sqlalchemy.orm import DeclarativeBase
+
+class Base(DeclarativeBase):
+    pass
+```
+
+`infrastructure/database/session.py`
+```python
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from config import settings
+
+engine = create_async_engine(settings.DATABASE_URL, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
+```
+
+`infrastructure/database/models/` — criar um arquivo por tabela:
+- `user.py` → tabela `users`
+- `sport_event.py` → tabelas `sport_events`, `markets`, `odds`
+- `bet.py` → tabelas `bets`, `bet_items`
+- `transaction.py` → tabela `transactions`
+- `casino_game.py` → tabela `casino_games`
+
+**Alembic:**
+```bash
+# instalar PostgreSQL local (se não tiver)
+brew install postgresql@16
+brew services start postgresql@16
+createdb rosabet
+
+# rodar migrations
+alembic revision --autogenerate -m "init tables"
+alembic upgrade head
+```
+
+**Testar:** `alembic upgrade head` sem erro e tabelas visíveis com `psql rosabet -c "\dt"`.
+
+---
+
+### Fase 3 — Auth (Login + Cadastro)
+
+**Objetivo:** usuário consegue se registrar e receber um JWT válido.
+
+**Rotas:**
+- `POST /client` — cadastro (nome, email, CPF, senha)
+- `POST /auth/login` — retorna `{ access_token, token_type }`
+- `GET /user/me` — retorna dados do usuário autenticado (requer Bearer)
+
+**Arquivos:**
+- `domain/services/auth_rules.py` — `hash_password()`, `verify_password()`, `create_token()`, `decode_token()`
+- `infrastructure/repositories/user_repository.py` — `get_by_email()`, `get_by_id()`, `create()`, `debit()`, `credit()`
+- `application/use_cases/auth/login.py` — `LoginUseCase`
+- `application/use_cases/auth/register.py` — `RegisterUseCase`
+- `application/schemas/auth.py` — `LoginRequest`, `TokenResponse`
+- `application/schemas/client.py` — `RegisterRequest`, `UserResponse`
+- `api/routers/auth.py` — endpoints
+- `api/dependencies.py` — `get_current_user`
+
+**Usuário demo para testes:**
+```python
+# seed: criar usuário demo ao iniciar em ENVIRONMENT=development
+# email: demo@rosabet.com | senha: demo123 | saldo: R$ 1.000,00
+```
+
+**Testar:**
+```bash
+# cadastro
+curl -X POST http://localhost:8000/client \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Demo","email":"demo@rosabet.com","cpf":"00000000000","password":"demo123"}'
+
+# login
+curl -X POST http://localhost:8000/auth/login \
+  -d "username=demo@rosabet.com&password=demo123"
+```
+
+---
+
+### Fase 4 — Eventos esportivos (seed + API)
+
+**Objetivo:** ter partidas com mercados e odds no banco, e a rota `/sport/open` retornando dados que o frontend consegue renderizar.
+
+**O que fazer:**
+
+1. Criar seed com 5 partidas (3 ao vivo + 2 pré-jogo) com odds iniciais realistas
+2. Implementar `infrastructure/repositories/event_repository.py`
+3. Implementar `GET /sport/open` — retorna lista de eventos com `reduced_markets`
+
+**Estrutura do seed (exemplo):**
+```python
+events = [
+    {
+        "enet_code": "sr:match:10001",
+        "sport_type": "Soccer",
+        "championship": "Copa do Mundo 2026",
+        "home_team": "Brasil", "out_team": "Argentina",
+        "is_live": True, "match_status": "1st Half", "played_time": "23'",
+        "home_score": 1, "away_score": 0,
+        "markets": [
+            {
+                "market_id": 1, "name": "1x2", "category": "MAIN",
+                "odds": [
+                    {"option_id": "1", "name": "1", "value": 1.85},
+                    {"option_id": "X", "name": "X", "value": 3.20},
+                    {"option_id": "2", "name": "2", "value": 4.50},
+                ]
+            },
+            {
+                "market_id": 5, "name": "Over/Under 2.5", "category": "MAIN",
+                "specifier": "total=2.5",
+                "odds": [
+                    {"option_id": "over", "name": "Acima", "value": 1.90},
+                    {"option_id": "under", "name": "Abaixo", "value": 1.90},
+                ]
+            },
+        ]
+    },
+    # ... mais 4 eventos
+]
+```
+
+**Testar:** abrir `http://localhost:3000/live` no frontend — deve listar as partidas.
+
+---
+
+### Fase 5 — WebSocket (odds ao vivo)
+
+**Objetivo:** o frontend recebe updates de odds em tempo real via WebSocket, exatamente como recebia do Sportradar.
+
+**Arquivos:**
+- `infrastructure/redis/client.py` — pool Redis async
+- `infrastructure/redis/pubsub.py` — `publish()`, `subscribe()`
+- `api/websocket/manager.py` — `ConnectionManager`
+- `api/websocket/sport_ws.py` — endpoint `ws://.../ws/events_sports_markets`
+- `worker/main.py` — inicializa APScheduler
+- `worker/odds_job.py` — job que roda a cada 5s
+
+**Fluxo do job:**
+```
+worker/odds_job.py (a cada 5s)
+  → busca eventos ao vivo no banco
+  → para cada mercado: calcula novas odds (domain/services/odds_calculator.py)
+  → salva no banco (odd_repository.bulk_update)
+  → publica no Redis: redis.publish("event:{enet_code}", json_payload)
+
+api/websocket/sport_ws.py (listener Redis permanente)
+  → ao receber mensagem do Redis
+  → ConnectionManager.broadcast(enet_code, data)
+  → clientes WebSocket desse evento recebem o update
+```
+
+**Rodar o worker separado:**
+```bash
+# terminal 1: API
+uvicorn api.main:app --reload --port 8000
+
+# terminal 2: Worker
+python worker/main.py
+```
+
+**Testar:** abrir a tela `/live` no frontend e observar odds piscando (mudando a cada 5s).
+
+---
+
+### Fase 6 — Apostas
+
+**Objetivo:** usuário consegue fazer aposta simples e múltipla, com cotação travada no momento do clique.
+
+**Rotas:**
+- `POST /bet` — cria aposta
+- `GET /bet` — lista apostas do usuário
+- `GET /bet/{id}` — detalhe de uma aposta
+
+**Regras críticas (`domain/services/betting_rules.py`):**
+```python
+def validate_bet(value: float, user_credits: float, selections: list):
+    if value <= 0:
+        raise BetError("Valor inválido", code=1001)
+    if value > user_credits:
+        raise BetError("Saldo insuficiente", code=1002)
+    if len(selections) == 0:
+        raise BetError("Nenhuma seleção", code=1003)
+    if len(selections) > 20:
+        raise BetError("Máximo 20 seleções", code=1004)
+
+def calculate_return(value: float, selections: list[float]) -> tuple[float, float]:
+    total_quotation = 1.0
+    for q in selections:
+        total_quotation *= q
+    return_value = round(value * total_quotation, 2)
+    return round(total_quotation, 4), return_value
+```
+
+**Lock de cotação (`application/use_cases/betting/create_bet.py`):**
+```python
+# para cada seleção:
+odd = await odd_repository.get_by_odd_id(selection.odd_id)
+locked_quotation = odd.value          # trava AQUI
+# se accept_all_changes=False e odd caiu → rejeita com code=1050
+```
+
+**Testar:** fazer aposta no frontend com saldo demo e verificar que `GET /bet` retorna a aposta com `status=OPENED` e `quotation` correto.
+
+---
+
+### Fase 7 — Liquidação de Apostas
+
+**Objetivo:** ao fim de cada partida, gerar resultado aleatório, avaliar cada seleção e pagar os vencedores.
+
+**Worker (`worker/result_job.py`):**
+```python
+# ao criar partida → agenda job para daqui a RESULT_DELAY_MINUTES
+# ex: partida de 90min → agenda resultado para 95min após started_at
+
+# ao executar:
+1. gera resultado ponderado pelas odds do mercado 1x2
+2. gera placar (home_goals, away_goals) coerente com o resultado
+3. salva resultado no banco + marca partida como FINISHED
+4. para cada bet_item → evaluate_outcome() → WINS ou LOST
+5. para cada aposta com todos items WINS → status=WINS, credita paid_value
+6. publica no Redis → WebSocket notifica frontend
+```
+
+**`domain/services/result_evaluator.py`** — cobre os mercados:
+- 1x2 (market_id=1)
+- Over/Under (market_id=5)
+- Both Teams to Score (market_id=3)
+- Double Chance (market_id=10)
+- 1st Half 1x2 (market_id=45)
+- 1st Half Over/Under (market_id=68)
+
+**Testar:** criar aposta, aguardar job rodar (diminuir `RESULT_DELAY_MINUTES=1` para teste), verificar que aposta mudou para `WINS` ou `LOST` e saldo foi atualizado.
+
+---
+
+### Fase 8 — Depósito PIX (simulado)
+
+**Objetivo:** usuário gera um PIX QR Code falso, "confirma" e saldo é creditado.
+
+**Rotas:**
+- `POST /deposit` — gera transação com QR Code fake (base64 de imagem placeholder)
+- `GET /deposit` — lista transações do usuário
+- `GET /deposit-welcome-verification` — verifica se é primeiro depósito (bônus)
+
+**Lógica simulada:**
+```python
+# CreateDepositUseCase
+# 1. cria transação com status=PENDING
+# 2. gera qr_code fake e expiration_date = now() + 30min
+# 3. inicia job assíncrono: após 10s, confirma automaticamente (simula pagamento)
+# 4. ao confirmar: user.credits += value + bonus; transaction.status = CONFIRMED
+```
+
+**Testar:** depositar R$ 100 no frontend, esperar 10s, verificar saldo atualizado.
+
+---
+
+### Fase 9 — Cassino
+
+**Objetivo:** telas de cassino funcionam com dados reais do banco em vez do mock Next.js.
+
+**Rotas:**
+- `GET /casino/games_type` — retorna `CasinoHighlights[]` agrupado por tipo
+- `GET /casino/games?type=SLOT` — retorna `CasinoI[]` filtrado
+- `POST /pragmatic/game-url` — retorna URL do jogo (pode ser placeholder)
+
+**Seed dos jogos:** migrar os 21 jogos do arquivo `src/app/api/casino/_data/games.ts` para uma migration SQL ou script Python de seed.
+
+**Testar:** acessar `/casino` no frontend com `NEXT_PUBLIC_BASE_URL=http://localhost:8000`.
+
+---
+
+### Fase 10 — Migração do Frontend
+
+**Objetivo:** desligar completamente as rotas fake do Next.js e apontar para o FastAPI.
+
+**Checklist:**
+```bash
+# 1. trocar .env.local do Next.js
+NEXT_PUBLIC_BASE_URL=http://localhost:8000
+NEXT_PUBLIC_SOCKET_URL=ws://localhost:8000
+
+# 2. deletar rotas fake (em lotes, testando após cada lote)
+rm -rf src/app/api/rules src/app/api/general-promotion src/app/api/promo-code src/app/api/sport
+# teste → ok?
+rm -rf src/app/api/casino src/app/api/pragmatic
+# teste → ok?
+rm -rf src/app/api/notification src/app/api/client-notification
+rm -rf src/app/api/deposit src/app/api/cashout src/app/api/check-withdrawals src/app/api/deposit-welcome-verification
+# teste → ok?
+rm -rf src/app/api/bet
+# teste → ok?
+rm -rf src/app/api/auth src/app/api/user src/app/api/client
+rm -rf src/app/api/_data
+
+# 3. confirmar que src/app/api/ está vazio
+ls src/app/api/
+```
+
+**Testar cada fluxo após migração:**
+- [ ] Login com demo@rosabet.com
+- [ ] Ver saldo na home
+- [ ] Navegar no cassino (categorias + jogos)
+- [ ] Ver partidas ao vivo (WebSocket ativo)
+- [ ] Fazer aposta simples
+- [ ] Simular depósito PIX
+- [ ] Ver histórico de apostas
+
+---
+
+### Resumo das fases
+
+| Fase | O que entrega | Pré-requisito |
+|---|---|---|
+| 1 | Estrutura + GitHub | — |
+| 2 | Banco + Alembic | PostgreSQL rodando |
+| 3 | Auth (login/cadastro/JWT) | Fase 2 |
+| 4 | Eventos + odds (seed + API) | Fase 2 |
+| 5 | WebSocket + Worker (odds ao vivo) | Fase 4 + Redis |
+| 6 | Apostas (lock de cotação) | Fase 3 + 4 |
+| 7 | Liquidação (resultado + pagamento) | Fase 5 + 6 |
+| 8 | Depósito PIX simulado | Fase 3 |
+| 9 | Cassino (seed + rotas) | Fase 2 |
+| 10 | Migração do frontend | Todas as fases anteriores |
