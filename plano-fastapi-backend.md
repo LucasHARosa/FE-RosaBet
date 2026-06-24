@@ -22,49 +22,16 @@
 
 ## Arquitetura — Clean Architecture
 
+O projeto é dividido em dois processos separados: a **API** (FastAPI) e o **Worker** (APScheduler). Cada camada só conhece a camada abaixo dela — a API nunca importa do Worker e vice-versa; ambos conversam via Redis.
+
 ```
 rosabet-api/
-├── app/
-│   ├── main.py              # FastAPI app, CORS, routers, WebSocket
-│   ├── config.py            # Settings via pydantic-settings (.env)
-│   ├── database.py          # engine async, SessionLocal, Base
+│
+├── api/                          # Processo 1: FastAPI
+│   ├── main.py                   # app, CORS, routers, lifespan
+│   ├── dependencies.py           # get_db, get_current_user, get_redis
 │   │
-│   ├── models/
-│   │   ├── user.py
-│   │   ├── bet.py           # bets + bet_items
-│   │   ├── transaction.py
-│   │   ├── sport_event.py   # partidas ao vivo e pré-jogo
-│   │   ├── market.py        # mercados de cada partida
-│   │   ├── odd.py           # odds de cada mercado
-│   │   ├── casino_game.py
-│   │   ├── notification.py
-│   │   └── promotion.py
-│   │
-│   ├── schemas/
-│   │   ├── auth.py
-│   │   ├── user.py
-│   │   ├── bet.py
-│   │   ├── sport_event.py
-│   │   ├── market.py
-│   │   ├── odd.py
-│   │   ├── transaction.py
-│   │   └── casino.py
-│   │
-│   ├── repositories/
-│   │   ├── user_repository.py
-│   │   ├── bet_repository.py
-│   │   ├── event_repository.py
-│   │   └── transaction_repository.py
-│   │
-│   ├── services/
-│   │   ├── auth_service.py
-│   │   ├── bet_service.py        # regras de aposta, lock de cotação
-│   │   ├── odds_service.py       # flutuação de odds, simulação
-│   │   ├── result_service.py     # geração de resultado + liquidação
-│   │   ├── deposit_service.py
-│   │   └── casino_service.py
-│   │
-│   ├── routers/
+│   ├── routers/                  # HTTP endpoints (só fazem parse + chama use case)
 │   │   ├── auth.py
 │   │   ├── client.py
 │   │   ├── bet.py
@@ -75,24 +42,119 @@ rosabet-api/
 │   │   ├── promotion.py
 │   │   └── rules.py
 │   │
-│   ├── websocket/
-│   │   ├── manager.py       # ConnectionManager: broadcast por canal
-│   │   └── sport_ws.py      # endpoint /ws/events_sports_markets
-│   │
-│   ├── scheduler/
-│   │   ├── odds_fluctuation.py   # job: varia odds a cada 5s
-│   │   └── result_generator.py   # job: gera resultado ao final da partida
-│   │
-│   └── core/
-│       ├── security.py
-│       ├── dependencies.py
-│       └── exceptions.py
+│   └── websocket/
+│       ├── manager.py            # ConnectionManager: subscribe/broadcast/unsubscribe
+│       └── sport_ws.py           # endpoint /ws/events_sports_markets + Redis listener
 │
+├── worker/                       # Processo 2: APScheduler (roda separado da API)
+│   ├── main.py                   # inicializa scheduler + jobs
+│   ├── odds_job.py               # job a cada 5s: varia odds ao vivo → publica Redis
+│   └── result_job.py             # job: agenda liquidação ao fim de cada partida
+│
+├── application/                  # Casos de uso — orquestram domain + infra
+│   ├── use_cases/
+│   │   ├── auth/
+│   │   │   └── login.py          # LoginUseCase
+│   │   ├── betting/
+│   │   │   ├── create_bet.py     # CreateBetUseCase: valida → trava cotação → debita → salva
+│   │   │   ├── cashout_bet.py    # CashoutBetUseCase
+│   │   │   └── settle_bet.py     # SettleBetUseCase: avalia resultado → paga → atualiza saldo
+│   │   ├── deposit/
+│   │   │   └── create_deposit.py # CreateDepositUseCase
+│   │   └── odds/
+│   │       └── fluctuate_odds.py # FluctuateOddsUseCase: lê evento → calcula → salva → emite
+│   │
+│   └── schemas/                  # Pydantic: request/response de cada use case
+│       ├── auth.py
+│       ├── bet.py
+│       ├── client.py
+│       ├── deposit.py
+│       ├── casino.py
+│       ├── sport_event.py
+│       └── odd.py
+│
+├── domain/                       # Regras de negócio puras — sem I/O, sem frameworks
+│   ├── entities/                 # Dataclasses simples (não são ORM models)
+│   │   ├── bet.py                # Bet, BetItem
+│   │   ├── user.py               # User
+│   │   ├── sport_event.py        # SportEvent, Market, Odd
+│   │   └── transaction.py
+│   │
+│   └── services/                 # Lógica pura, testável sem banco
+│       ├── betting_rules.py      # validate_bet(), calculate_return()
+│       ├── odds_calculator.py    # fluctuate_odd(), generate_correlated_odds()
+│       ├── result_evaluator.py   # evaluate_outcome() por market_id
+│       └── score_generator.py    # generate_score(outcome) → (home, away)
+│
+├── infrastructure/               # Adaptadores para tecnologias externas
+│   ├── database/
+│   │   ├── base.py               # Base declarativa + engine async
+│   │   ├── session.py            # AsyncSessionLocal, get_db()
+│   │   └── models/               # SQLAlchemy ORM models (mapeiam tabelas)
+│   │       ├── user.py
+│   │       ├── bet.py
+│   │       ├── transaction.py
+│   │       ├── sport_event.py
+│   │       ├── market.py
+│   │       ├── odd.py
+│   │       └── casino_game.py
+│   │
+│   ├── repositories/             # Implementações concretas de acesso ao banco
+│   │   ├── user_repository.py
+│   │   ├── bet_repository.py
+│   │   ├── event_repository.py
+│   │   ├── odd_repository.py
+│   │   └── transaction_repository.py
+│   │
+│   └── redis/
+│       ├── client.py             # get_redis(), pool de conexões
+│       └── pubsub.py             # publish(), subscribe()
+│
+├── config.py                     # Settings via pydantic-settings (.env)
 ├── alembic/
 ├── tests/
+│   ├── domain/                   # Testa domain/services sem I/O (puro Python)
+│   ├── application/              # Testa use cases com repositórios mockados
+│   └── api/                      # Testa routers com TestClient
 ├── .env
 ├── requirements.txt
 └── docker-compose.yml
+```
+
+### Fluxo de uma requisição (exemplo: `POST /bet`)
+
+```
+Router (api/routers/bet.py)
+  ↓  parse body → BetRequest schema
+  ↓  injeta: db, current_user, redis
+
+CreateBetUseCase (application/use_cases/betting/create_bet.py)
+  ↓  chama domain/services/betting_rules.py → validate_bet()
+  ↓  chama infrastructure/repositories/odd_repository.py → get_by_odd_id()
+  ↓  trava quotation = odd.value
+  ↓  chama domain/services/betting_rules.py → calculate_return()
+  ↓  chama infrastructure/repositories/bet_repository.py → save()
+  ↓  chama infrastructure/repositories/user_repository.py → debit()
+
+Router → retorna BetResponse
+```
+
+### Fluxo do Worker (odds ao vivo)
+
+```
+worker/odds_job.py  (roda a cada 5s)
+  ↓  chama FluctuateOddsUseCase
+
+FluctuateOddsUseCase
+  ↓  event_repository.get_live_events()
+  ↓  domain/services/odds_calculator.py → generate_correlated_odds()
+  ↓  odd_repository.bulk_update()
+  ↓  infrastructure/redis/pubsub.py → publish("event:{enet_code}", payload)
+
+api/websocket/sport_ws.py  (listener Redis)
+  ↓  recebe mensagem do canal
+  ↓  ConnectionManager.broadcast(enet_code, data)
+  ↓  todos os WebSockets desse evento recebem o update
 ```
 
 ---
