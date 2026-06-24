@@ -865,111 +865,305 @@ O projeto `BE-RosaBet` já tem a estrutura de pastas criada. As fases abaixo seg
 
 ---
 
-### Fase 2 — Config + Banco de dados
+### Fase 2 — Config + Banco de dados ✅
 
-**Objetivo:** conectar no PostgreSQL e ter as tabelas criadas via Alembic.
+**Objetivo:** conectar a API no PostgreSQL e ter todas as tabelas criadas e versionadas via Alembic.
 
-**Arquivos a criar:**
-
-`config.py`
-```python
-from pydantic_settings import BaseSettings
-
-class Settings(BaseSettings):
-    DATABASE_URL: str
-    SECRET_KEY: str
-    REDIS_URL: str = "redis://localhost:6379"
-    ENVIRONMENT: str = "development"
-    ODDS_UPDATE_INTERVAL_SECONDS: int = 5
-    RESULT_DELAY_MINUTES: int = 90
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
-
-    class Config:
-        env_file = ".env"
-
-settings = Settings()
-```
-
-`infrastructure/database/base.py`
-```python
-from sqlalchemy.orm import DeclarativeBase
-
-class Base(DeclarativeBase):
-    pass
-```
-
-`infrastructure/database/session.py`
-```python
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from config import settings
-
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
-
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
-```
-
-`infrastructure/database/models/` — criar um arquivo por tabela:
-- `user.py` → tabela `users`
-- `sport_event.py` → tabelas `sport_events`, `markets`, `odds`
-- `bet.py` → tabelas `bets`, `bet_items`
-- `transaction.py` → tabela `transactions`
-- `casino_game.py` → tabela `casino_games`
-
-**Alembic:**
-```bash
-# instalar PostgreSQL local (se não tiver)
-brew install postgresql@16
-brew services start postgresql@16
-createdb rosabet
-
-# rodar migrations
-alembic revision --autogenerate -m "init tables"
-alembic upgrade head
-```
-
-**Testar:** `alembic upgrade head` sem erro e tabelas visíveis com `psql rosabet -c "\dt"`.
+**Status:** concluída. As 8 tabelas estão no banco e o servidor responde em `GET /health`.
 
 ---
 
-### Fase 3 — Auth (Login + Cadastro)
+#### O que foi criado e por quê
 
-**Objetivo:** usuário consegue se registrar e receber um JWT válido.
+**`.env`**
 
-**Rotas:**
-- `POST /client` — cadastro (nome, email, CPF, senha)
-- `POST /auth/login` — retorna `{ access_token, token_type }`
-- `GET /user/me` — retorna dados do usuário autenticado (requer Bearer)
+Arquivo de configuração local que nunca vai para o git. Contém as credenciais de banco, a chave secreta do JWT, a URL do Redis e parâmetros de comportamento do sistema (intervalo de atualização de odds, tempo para gerar resultado, etc.). O `.env.example` é a versão sem valores reais que vai para o repositório, para que outros desenvolvedores saibam quais variáveis precisam configurar.
 
-**Arquivos:**
-- `domain/services/auth_rules.py` — `hash_password()`, `verify_password()`, `create_token()`, `decode_token()`
-- `infrastructure/repositories/user_repository.py` — `get_by_email()`, `get_by_id()`, `create()`, `debit()`, `credit()`
-- `application/use_cases/auth/login.py` — `LoginUseCase`
-- `application/use_cases/auth/register.py` — `RegisterUseCase`
-- `application/schemas/auth.py` — `LoginRequest`, `TokenResponse`
-- `application/schemas/client.py` — `RegisterRequest`, `UserResponse`
-- `api/routers/auth.py` — endpoints
-- `api/dependencies.py` — `get_current_user`
+**`config.py`**
 
-**Usuário demo para testes:**
-```python
-# seed: criar usuário demo ao iniciar em ENVIRONMENT=development
-# email: demo@rosabet.com | senha: demo123 | saldo: R$ 1.000,00
-```
+Lê o `.env` via Pydantic Settings e expõe um objeto `settings` tipado. Qualquer arquivo do projeto que precise de configuração importa `settings` daqui — nunca lê `os.environ` diretamente. Se uma variável obrigatória estiver faltando, a aplicação não sobe e mostra exatamente qual variável está faltando.
 
-**Testar:**
+**`infrastructure/database/base.py`**
+
+Define o `Base`, que é a classe pai de todos os models SQLAlchemy. Ele mantém um registro interno (`metadata`) de todas as tabelas que foram declaradas. O Alembic lê esse `metadata` para saber quais tabelas criar ou alterar nas migrations.
+
+**`infrastructure/database/session.py`**
+
+Cria dois objetos fundamentais:
+- `engine` — a conexão física com o PostgreSQL, configurada para rodar de forma assíncrona (`asyncpg`). Em desenvolvimento, loga todas as queries SQL no terminal para facilitar o debug.
+- `get_db()` — uma função geradora assíncrona que abre uma sessão de banco, injeta nos endpoints via `Depends()` do FastAPI, e fecha a sessão automaticamente ao final da requisição, mesmo em caso de erro.
+
+**`infrastructure/database/models/`**
+
+Cinco arquivos que mapeiam as tabelas do banco em classes Python (ORM). Cada campo da classe vira uma coluna SQL. O SQLAlchemy cuida de converter tipos Python (str, int, float, UUID, datetime) para os tipos correspondentes do PostgreSQL (VARCHAR, INTEGER, NUMERIC, UUID, TIMESTAMP). Os `relationship()` definem as associações entre tabelas sem precisar escrever JOINs manualmente.
+
+| Arquivo | Classes | Tabelas |
+|---|---|---|
+| `models/user.py` | `User` | `users` |
+| `models/sport_event.py` | `SportEvent`, `Market`, `Odd` | `sport_events`, `markets`, `odds` |
+| `models/bet.py` | `Bet`, `BetItem` | `bets`, `bet_items` |
+| `models/transaction.py` | `Transaction` | `transactions` |
+| `models/casino_game.py` | `CasinoGame` | `casino_games` |
+
+**`infrastructure/database/models/__init__.py`**
+
+Importa todas as classes de models em um só lugar. Isso garante que quando o Alembic carrega o `Base.metadata`, todos os models já estão registrados — sem esse arquivo, o `alembic revision --autogenerate` não enxergaria as tabelas.
+
+**`api/main.py`**
+
+App FastAPI com CORS configurado (aceita requisições do frontend em `localhost:3000`) e um endpoint `GET /health` para confirmar que a API está no ar. O `lifespan` é o lugar onde, nas próximas fases, vão entrar inicializações como a conexão com Redis e o seed de dados de desenvolvimento.
+
+---
+
+#### O que o Alembic cria automaticamente
+
+O Alembic é o sistema de versionamento do banco de dados. Ele funciona em dois passos:
+
+**`alembic revision --autogenerate -m "init tables"`**
+Compara o estado atual do banco (vazio) com o que os models declaram e gera um arquivo Python em `alembic/versions/` contendo os comandos SQL de criação de tabelas. Esse arquivo é versionado no git — serve como histórico de todas as mudanças de schema do projeto.
+
+**`alembic upgrade head`**
+Executa os arquivos de versão pendentes e aplica as mudanças no banco. Criou as 9 tabelas (8 de negócio + `alembic_version`, que é a tabela de controle interna do Alembic para saber qual versão o banco está).
+
+Sempre que um model for alterado no futuro (adicionar uma coluna, mudar um tipo), o ciclo se repete:
 ```bash
-# cadastro
-curl -X POST http://localhost:8000/client \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Demo","email":"demo@rosabet.com","cpf":"00000000000","password":"demo123"}'
-
-# login
-curl -X POST http://localhost:8000/auth/login \
-  -d "username=demo@rosabet.com&password=demo123"
+alembic revision --autogenerate -m "descricao da mudanca"
+alembic upgrade head
 ```
+
+---
+
+#### Arquivo `requests/rosabet.http`
+
+Criado junto com a Fase 2 para ser usado ao longo de todo o projeto. É o arquivo da extensão REST Client do VSCode — funciona como um Postman embutido no editor. Contém todas as rotas organizadas por fase, com as das fases futuras comentadas. Conforme cada fase for implementada, basta descomentar o bloco correspondente.
+
+---
+
+**Testar a Fase 2:**
+
+```bash
+# subir o servidor
+source .venv/bin/activate
+uvicorn api.main:app --reload --port 8000
+```
+
+Abrir `requests/rosabet.http` e clicar em **Send Request** no `GET /health`. Resposta esperada:
+```json
+{ "status": "ok", "environment": "development" }
+```
+
+Verificar tabelas no banco:
+```bash
+psql rosabet -c "\dt"
+# deve listar as 9 tabelas (8 + alembic_version)
+```
+
+---
+
+### Fase 3 — Auth (Login + Cadastro) ✅
+
+**Objetivo:** usuário consegue se registrar, fazer login e receber um JWT válido para acessar rotas protegidas.
+
+**Rotas implementadas:**
+- `POST /client` — cadastro de novo usuário
+- `POST /auth/login` — retorna `{ access_token, token_type: "bearer" }`
+- `GET /user/me` — retorna dados do usuário autenticado (requer `Authorization: Bearer <token>`)
+
+---
+
+#### Arquivos criados e o que cada um faz
+
+**`domain/services/auth_rules.py`**
+
+A camada mais interna — zero dependência de banco ou HTTP. Quatro funções puras:
+
+| Função | O que faz | Usa |
+|---|---|---|
+| `hash_password(plain)` | Transforma `"demo123"` em `"$2b$12$..."` | `bcrypt.hashpw()` |
+| `verify_password(plain, hashed)` | Compara senha digitada com hash do banco | `bcrypt.checkpw()` |
+| `create_access_token(user_id)` | Cria JWT assinado com `SECRET_KEY`, expira em 7 dias | `python-jose` |
+| `decode_token(token)` | Valida assinatura + expiração, retorna `user_id` | `python-jose` |
+
+O bcrypt nunca descriptografa — ele recalcula o hash com o salt embutido e compara. Dois hashes da mesma senha são sempre diferentes (salt aleatório), o que impede ataques de dicionário.
+
+---
+
+**`infrastructure/repositories/user_repository.py`**
+
+Único arquivo que executa SQL relacionado a usuários. Recebe sempre uma `AsyncSession` como parâmetro (injetada pelo FastAPI, nunca cria a própria conexão).
+
+| Função | SQL executado |
+|---|---|
+| `get_by_email(db, email)` | `SELECT * FROM users WHERE email = $1` |
+| `get_by_cpf(db, cpf)` | `SELECT * FROM users WHERE cpf = $1` |
+| `get_by_id(db, user_id)` | `SELECT * FROM users WHERE id = $1` |
+| `create(db, user)` | `INSERT INTO users ... RETURNING ...` |
+| `update(db, user)` | `COMMIT` (o objeto já foi modificado em memória) |
+| `debit(db, user_id, value, from_field)` | Subtrai `value` do campo `credits`, `sports_bonus` ou `casino_credits` |
+| `credit(db, user_id, value, to_field)` | Soma `value` no campo correspondente |
+
+Não conhece regras de negócio — não sabe se o saldo vai ficar negativo, não valida email. Apenas persiste o que recebe.
+
+---
+
+**`application/schemas/auth.py`**
+
+Contratos Pydantic para a rota de login:
+
+- `LoginRequest` — `{ username: str, password: str }` — o que o cliente manda
+- `TokenResponse` — `{ access_token: str, token_type: "bearer" }` — o que a API devolve
+
+O Pydantic valida automaticamente os tipos antes do código do use case rodar. Se `username` vier como número, a API retorna `422 Unprocessable Entity` sem chamar nenhuma linha de código do use case.
+
+---
+
+**`application/schemas/client.py`**
+
+Contratos para cadastro e exibição de usuário:
+
+- `RegisterRequest` — campos do formulário de cadastro. Tem dois validadores automáticos:
+  - CPF: remove caracteres não-numéricos e exige exatamente 11 dígitos
+  - Nome: remove espaços extras e exige mínimo 3 caracteres
+- `UserResponse` — dados que a API expõe do usuário (nunca expõe `password_hash`). `model_config = {"from_attributes": True}` permite construir o schema direto de um objeto SQLAlchemy sem conversão manual.
+
+---
+
+**`application/use_cases/auth/login.py` — `LoginUseCase`**
+
+Orquestra o fluxo de login. Chama o repository e o domain:
+
+```
+LoginUseCase.execute(data: LoginRequest)
+  │
+  ├── user_repo.get_by_email(db, data.username)
+  │     └── se não encontrou → 401 (mensagem genérica, não revela se email existe)
+  │
+  ├── auth_rules.verify_password(data.password, user.password_hash)
+  │     └── se senha errada → 401
+  │
+  ├── verifica user.active e user.self_excluded → 403 se bloqueado
+  │
+  └── auth_rules.create_access_token(str(user.id))
+        └── retorna TokenResponse
+```
+
+A mensagem `"Email ou senha inválidos"` é intencional para os dois casos (email não existe / senha errada) — não revela qual dos dois falhou, o que dificulta enumeração de usuários.
+
+---
+
+**`application/use_cases/auth/register.py` — `RegisterUseCase`**
+
+Orquestra o cadastro:
+
+```
+RegisterUseCase.execute(data: RegisterRequest)
+  │
+  ├── user_repo.get_by_email(db, data.email)
+  │     └── se já existe → 409 Conflict, code 1010
+  │
+  ├── user_repo.get_by_cpf(db, data.cpf)
+  │     └── se já existe → 409 Conflict, code 1011
+  │
+  ├── gera username a partir do email se não fornecido
+  │     ("lucas@rosabet.com" → "lucas")
+  │
+  ├── auth_rules.hash_password(data.password)
+  │     └── nunca salva senha em texto puro
+  │
+  └── user_repo.create(db, User(...))
+        └── retorna UserResponse
+```
+
+---
+
+**`api/dependencies.py` — `get_current_user`**
+
+O porteiro de todas as rotas protegidas. É uma **dependency function** do FastAPI — qualquer endpoint que declare `Depends(get_current_user)` passa por aqui antes de executar:
+
+```
+Requisição chega com header: Authorization: Bearer eyJhbGci...
+  │
+  ├── oauth2_scheme extrai o token do header automaticamente
+  │
+  ├── auth_rules.decode_token(token)
+  │     └── valida assinatura e expiração → extrai user_id
+  │     └── se inválido → 401, o endpoint nem executa
+  │
+  └── user_repo.get_by_id(db, user_id)
+        └── se não encontrou ou inativo → 401
+        └── se ok → devolve objeto User para o endpoint usar
+```
+
+`OAuth2PasswordBearer(tokenUrl="/auth/login")` serve para o FastAPI saber onde o token é obtido — aparece automaticamente na documentação interativa em `/docs`.
+
+---
+
+**`api/routers/auth.py` e `api/routers/client.py`**
+
+Os routers são intencionalmente finos. Cada endpoint faz exatamente três coisas:
+1. Declara a rota e injeta dependências (`Depends(get_db)`, `Depends(get_current_user)`)
+2. Instancia o use case com a sessão de banco
+3. Chama `.execute()` e retorna o resultado
+
+Sem lógica de negócio, sem SQL, sem manipulação de JWT. Tudo isso está nas camadas abaixo.
+
+---
+
+**`api/main.py` — seed do usuário demo**
+
+`_seed_demo_user()` roda dentro do `lifespan`, que executa uma vez ao subir o servidor antes de aceitar requisições. Cria `demo@rosabet.com` com `R$ 1.000,00` de crédito se ainda não existir. Roda só quando `ENVIRONMENT=development`.
+
+---
+
+#### Fluxo completo: `POST /auth/login`
+
+```
+Cliente: POST /auth/login  { "username": "demo@rosabet.com", "password": "demo123" }
+    ↓
+FastAPI: valida body com LoginRequest (Pydantic) → ok
+    ↓
+api/routers/auth.py: instancia LoginUseCase(db) e chama .execute(data)
+    ↓
+application/use_cases/auth/login.py:
+    → user_repo.get_by_email(db, "demo@rosabet.com")
+         ↓ SELECT FROM users WHERE email = 'demo@rosabet.com'
+         ↓ retorna objeto User com password_hash
+    → auth_rules.verify_password("demo123", "$2b$12$...")  → True
+    → auth_rules.create_access_token("64ae052d-...")
+         ↓ JWT: { sub: "64ae052d-...", exp: agora+7dias }, assinado com SECRET_KEY
+         ↓ retorna "eyJhbGci..."
+    → retorna TokenResponse
+    ↓
+FastAPI: serializa com TokenResponse, HTTP 200
+    ↓
+Cliente recebe: { "access_token": "eyJhbGci...", "token_type": "bearer" }
+```
+
+#### Fluxo completo: `GET /user/me`
+
+```
+Cliente: GET /user/me   Authorization: Bearer eyJhbGci...
+    ↓
+FastAPI: oauth2_scheme extrai token do header
+    ↓
+api/dependencies.py: get_current_user(token, db)
+    → auth_rules.decode_token("eyJhbGci...")  → "64ae052d-..."
+    → user_repo.get_by_id(db, "64ae052d-...")
+         ↓ SELECT FROM users WHERE id = '64ae052d-...'
+         ↓ retorna objeto User
+    ↓
+api/routers/auth.py: endpoint me() recebe User pronto, devolve direto
+    ↓
+FastAPI: serializa com UserResponse (sem password_hash), HTTP 200
+```
+
+---
+
+**Testar com REST Client** — abrir `requests/rosabet.http`:
+1. Clicar em **Send Request** no `POST /auth/login`
+2. Copiar o `access_token` da resposta
+3. Colar na variável `@token` no topo do arquivo
+4. Clicar em **Send Request** no `GET /user/me`
 
 ---
 
