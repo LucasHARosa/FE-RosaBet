@@ -1,0 +1,787 @@
+# Plano: Backend FastAPI — RosaBet
+
+---
+
+## Stack
+
+| Camada | Tecnologia |
+|---|---|
+| Framework | FastAPI |
+| ORM | SQLAlchemy 2.0 (async) |
+| Banco de dados | PostgreSQL |
+| Migrations | Alembic |
+| Auth | JWT (python-jose) + bcrypt (passlib) |
+| Cache / Pub-Sub | Redis |
+| WebSocket | FastAPI WebSocket nativo |
+| Validação | Pydantic v2 |
+| Tasks assíncronas | APScheduler (simulação de odds + resultados) |
+| Servidor | Uvicorn + Gunicorn |
+| Container | Docker + Docker Compose |
+
+---
+
+## Arquitetura — Clean Architecture
+
+```
+rosabet-api/
+├── app/
+│   ├── main.py              # FastAPI app, CORS, routers, WebSocket
+│   ├── config.py            # Settings via pydantic-settings (.env)
+│   ├── database.py          # engine async, SessionLocal, Base
+│   │
+│   ├── models/
+│   │   ├── user.py
+│   │   ├── bet.py           # bets + bet_items
+│   │   ├── transaction.py
+│   │   ├── sport_event.py   # partidas ao vivo e pré-jogo
+│   │   ├── market.py        # mercados de cada partida
+│   │   ├── odd.py           # odds de cada mercado
+│   │   ├── casino_game.py
+│   │   ├── notification.py
+│   │   └── promotion.py
+│   │
+│   ├── schemas/
+│   │   ├── auth.py
+│   │   ├── user.py
+│   │   ├── bet.py
+│   │   ├── sport_event.py
+│   │   ├── market.py
+│   │   ├── odd.py
+│   │   ├── transaction.py
+│   │   └── casino.py
+│   │
+│   ├── repositories/
+│   │   ├── user_repository.py
+│   │   ├── bet_repository.py
+│   │   ├── event_repository.py
+│   │   └── transaction_repository.py
+│   │
+│   ├── services/
+│   │   ├── auth_service.py
+│   │   ├── bet_service.py        # regras de aposta, lock de cotação
+│   │   ├── odds_service.py       # flutuação de odds, simulação
+│   │   ├── result_service.py     # geração de resultado + liquidação
+│   │   ├── deposit_service.py
+│   │   └── casino_service.py
+│   │
+│   ├── routers/
+│   │   ├── auth.py
+│   │   ├── client.py
+│   │   ├── bet.py
+│   │   ├── deposit.py
+│   │   ├── casino.py
+│   │   ├── sport.py
+│   │   ├── notification.py
+│   │   ├── promotion.py
+│   │   └── rules.py
+│   │
+│   ├── websocket/
+│   │   ├── manager.py       # ConnectionManager: broadcast por canal
+│   │   └── sport_ws.py      # endpoint /ws/events_sports_markets
+│   │
+│   ├── scheduler/
+│   │   ├── odds_fluctuation.py   # job: varia odds a cada 5s
+│   │   └── result_generator.py   # job: gera resultado ao final da partida
+│   │
+│   └── core/
+│       ├── security.py
+│       ├── dependencies.py
+│       └── exceptions.py
+│
+├── alembic/
+├── tests/
+├── .env
+├── requirements.txt
+└── docker-compose.yml
+```
+
+---
+
+## Banco de Dados
+
+### `users`
+```sql
+id              UUID PRIMARY KEY DEFAULT gen_random_uuid()
+name            VARCHAR(100) NOT NULL
+username        VARCHAR(50)  UNIQUE NOT NULL
+email           VARCHAR(150) UNIQUE NOT NULL
+cpf             VARCHAR(11)  UNIQUE NOT NULL
+password_hash   VARCHAR(255) NOT NULL
+phone           VARCHAR(20)
+birth_date      DATE
+type            VARCHAR(20)  DEFAULT 'CLIENT'
+credits         NUMERIC(12,2) DEFAULT 0
+casino_credits  NUMERIC(12,2) DEFAULT 0
+sports_bonus    NUMERIC(12,2) DEFAULT 0
+retained_credit NUMERIC(12,2) DEFAULT 0
+currency        VARCHAR(5)   DEFAULT 'BRL'
+pix_key         VARCHAR(150)
+pix_key_type    VARCHAR(30)
+email_confirmed BOOLEAN      DEFAULT false
+active          BOOLEAN      DEFAULT true
+break_period_end TIMESTAMP
+self_excluded   BOOLEAN      DEFAULT false
+notification_sms   BOOLEAN   DEFAULT true
+notification_email BOOLEAN   DEFAULT true
+created_at      TIMESTAMP    DEFAULT now()
+updated_at      TIMESTAMP    DEFAULT now()
+```
+
+### `sport_events` — partidas (ao vivo e pré-jogo)
+```sql
+id                    UUID PRIMARY KEY
+enet_code             VARCHAR(50) UNIQUE NOT NULL  -- identificador do frontend
+sport_type            VARCHAR(30) NOT NULL          -- Soccer | Basketball | Tennis | MMA ...
+championship          VARCHAR(150)
+championship_en       VARCHAR(150)
+country               VARCHAR(100)
+country_en            VARCHAR(100)
+home_team             VARCHAR(100)
+out_team              VARCHAR(100)
+home_coats_of_arms    TEXT                          -- URL escudo time casa
+out_coats_of_arms     TEXT                          -- URL escudo time fora
+home_score            INT          DEFAULT 0
+away_score            INT          DEFAULT 0
+is_live               BOOLEAN      DEFAULT false
+status                VARCHAR(20)  DEFAULT 'NOT_STARTED'
+  -- NOT_STARTED | LIVE | HALFTIME | FINISHED | CANCELLED
+match_status          VARCHAR(50)                   -- "1st Half" | "Halftime" | "2nd Half"
+played_time           VARCHAR(10)                   -- "45'" | "90+2'"
+scheduled_at          TIMESTAMP    NOT NULL
+started_at            TIMESTAMP
+finished_at           TIMESTAMP
+result                JSONB                         -- {"home": 2, "away": 1}
+valid_odds            INT          DEFAULT 0
+created_at            TIMESTAMP    DEFAULT now()
+```
+
+### `markets` — mercados de cada partida
+```sql
+id              UUID PRIMARY KEY
+event_id        UUID REFERENCES sport_events(id)
+market_id       INT  NOT NULL               -- ID numérico do Sportradar (ex: 1 = 1x2)
+name            VARCHAR(200) NOT NULL       -- "1x2" | "Total" | "Handicap"
+name_pt         VARCHAR(200)               -- tradução PT-BR
+category        VARCHAR(30)
+  -- MAIN | GOALS | CORNERS_CARDS | 1ST_2ND | PLAYERS | SPECIALS | ASIAN | OTHERS
+status          VARCHAR(20)  DEFAULT 'ACTIVE'  -- ACTIVE | SUSPENDED | SETTLED
+specifier       VARCHAR(100)               -- ex: "total=2.5" para mercados de total
+has_specifiers  BOOLEAN      DEFAULT false
+status_change_only BOOLEAN   DEFAULT false
+created_at      TIMESTAMP    DEFAULT now()
+```
+
+### `odds` — cotações de cada mercado
+```sql
+id              UUID PRIMARY KEY
+market_id       UUID REFERENCES markets(id)
+event_id        UUID REFERENCES sport_events(id)  -- denorm p/ query rápida
+odd_id          VARCHAR(100) NOT NULL              -- hash único (market_id:option_id)
+option_id       VARCHAR(50)  NOT NULL              -- "1" | "X" | "2" | "over" | "under"
+name            VARCHAR(100) NOT NULL              -- "1" | "Empate" | "2" | "Acima" | "Abaixo"
+value           NUMERIC(6,2) NOT NULL              -- cotação atual, ex: 2.35
+prev_value      NUMERIC(6,2)                       -- cotação anterior (tracking de variação)
+active          BOOLEAN      DEFAULT true
+hash            VARCHAR(200)                       -- hash composto p/ identificação no frontend
+updated_at      TIMESTAMP    DEFAULT now()
+```
+
+### `bets` — apostas
+```sql
+id                  UUID PRIMARY KEY
+user_id             UUID REFERENCES users(id)
+code                VARCHAR(50) UNIQUE             -- código amigável ex: "RB-2026-001234"
+status              VARCHAR(20)
+  -- OPENED | WINS | LOST | CANCELLED | CASHOUTED
+value               NUMERIC(12,2) NOT NULL         -- valor apostado
+return_value        NUMERIC(12,2) NOT NULL         -- retorno esperado (value × cotação total)
+paid_value          NUMERIC(12,2) DEFAULT 0        -- valor pago ao usuário
+extracted_quotation NUMERIC(8,4)  NOT NULL         -- produto das cotações no momento da aposta
+currency            VARCHAR(5)    DEFAULT 'BRL'
+free_bet            BOOLEAN       DEFAULT false
+spend_from          VARCHAR(30)                    -- "credits" | "bonus" | "casino_credits"
+type                VARCHAR(20)   DEFAULT 'SIMPLE' -- SIMPLE | MULTIPLE | SYSTEM
+accept_all_changes  BOOLEAN       DEFAULT false    -- aceitar qualquer mudança de odd
+only_accept_high    BOOLEAN       DEFAULT false    -- só aceitar se odd subir
+qtt_sports          INT           DEFAULT 1
+qtt_open_sports     INT           DEFAULT 1
+cashoutable         BOOLEAN       DEFAULT false
+cashout_value       NUMERIC(12,2)
+mobile              BOOLEAN       DEFAULT false
+source              VARCHAR(30)   DEFAULT 'WEB'
+created_at          TIMESTAMP     DEFAULT now()
+settled_at          TIMESTAMP
+```
+
+### `bet_items` — cada seleção dentro de uma aposta
+```sql
+id              UUID PRIMARY KEY
+bet_id          UUID REFERENCES bets(id)
+event_id        UUID REFERENCES sport_events(id)
+enet_code       VARCHAR(50)                       -- para lookups rápidos
+market_id       INT  NOT NULL                     -- ID numérico do mercado
+odd_id          VARCHAR(100) NOT NULL             -- hash da odd selecionada
+option_id       VARCHAR(50)  NOT NULL             -- opção escolhida
+quotation       NUMERIC(6,2) NOT NULL             -- cotação TRAVADA no momento da aposta
+is_live         BOOLEAN       DEFAULT false
+specifier       JSONB                             -- {"total": "2.5"} se aplicável
+status          VARCHAR(20)   DEFAULT 'OPENED'   -- OPENED | WINS | LOST | CANCELLED
+previous_status VARCHAR(20)
+```
+
+### `transactions`
+```sql
+id              UUID PRIMARY KEY
+user_id         UUID REFERENCES users(id)
+type            VARCHAR(20)   -- DEPOSIT | WITHDRAWAL
+status          VARCHAR(20)   -- PENDING | CONFIRMED | CANCELLED | EXPIRED
+value           NUMERIC(12,2)
+bonus           NUMERIC(12,2) DEFAULT 0
+bonus_type      VARCHAR(50)
+qr_code         TEXT
+qr_code_image   TEXT
+expiration_date TIMESTAMP
+company         VARCHAR(50)
+confirmed       BOOLEAN       DEFAULT false
+created_at      TIMESTAMP     DEFAULT now()
+```
+
+### `casino_games`
+```sql
+id              UUID PRIMARY KEY
+name            VARCHAR(150)  NOT NULL
+game_code       VARCHAR(100)  UNIQUE NOT NULL
+desktop_id      VARCHAR(100)
+mobile_id       VARCHAR(100)
+provider        VARCHAR(100)
+type            VARCHAR(50)   -- slot | roulette | live_dealer | bingo | table | casual | scratch_card
+game_image      TEXT
+active          BOOLEAN       DEFAULT true
+demo            BOOLEAN       DEFAULT false
+highlights      BOOLEAN       DEFAULT false
+highlight_order INT
+news            VARCHAR(10)
+news_order      INT
+on_the_rise     VARCHAR(10)
+on_the_rise_order INT
+created_at      TIMESTAMP     DEFAULT now()
+```
+
+---
+
+## Sistema de Odds — Como Funciona
+
+### Estrutura de mercado que o frontend consome
+
+Cada evento chega via WebSocket no formato:
+```json
+[{
+  "enet_code": "sr:match:12345",
+  "home_team": "Brasil",
+  "out_team": "Argentina",
+  "is_live": true,
+  "match_status": "1st Half",
+  "played_time": "23'",
+  "home_score": 1,
+  "away_score": 0,
+  "markets": "<compressed_string>",
+  "reduced_markets": [
+    {
+      "id": "1",
+      "name": "1x2",
+      "hash": "1::",
+      "status": "Active",
+      "statusChangeOnly": false,
+      "odds": [
+        {"odd": 1.85, "name": "1", "optionId": "1", "hash": "1::1", "active": true, "timestamp": 1234567890},
+        {"odd": 3.20, "name": "X", "optionId": "X", "hash": "1::X", "active": true, "timestamp": 1234567890},
+        {"odd": 4.50, "name": "2", "optionId": "2", "hash": "1::2", "active": true, "timestamp": 1234567890}
+      ]
+    }
+  ]
+}]
+```
+
+### Mercados principais e seus IDs (Sportradar)
+
+| ID | Nome | Opções | Categoria |
+|---|---|---|---|
+| 1 | 1x2 | 1, X, 2 | MAIN |
+| 2 | Asian handicap | h1, h2 | ASIAN |
+| 3 | Both teams to score | yes, no | MAIN |
+| 5 | Over/Under | over, under | MAIN |
+| 10 | Double chance | 1X, 12, X2 | MAIN |
+| 18 | Total goals | 0, 1, 2, 3, 4+ | GOALS |
+| 26 | Correct score | 0:0, 1:0, 0:1... | MAIN |
+| 29 | 1st half - 1x2 | 1, X, 2 | 1ST_2ND |
+| 68 | 1st half - over/under | over, under | 1ST_2ND |
+| 45 | 1x2 (1st half) | 1, X, 2 | 1ST_2ND |
+| 136 | Total corners | over, under | CORNERS_CARDS |
+| 166 | Total bookings | over, under | CORNERS_CARDS |
+
+### Flutuação de Odds — Algoritmo
+
+```python
+# app/services/odds_service.py
+
+import random
+import math
+
+def fluctuate_odd(current: float, is_live: bool, event_minute: int) -> float:
+    """
+    Gera variação natural de odds com as seguintes regras:
+    - Variação máxima por ciclo: ±3% em pré-jogo, ±6% ao vivo
+    - Odds extremamente baixas (<1.15) raramente sobem
+    - Odds altas (>5.0) têm maior volatilidade
+    - Próximo ao fim da partida, odds dominantes caem mais
+    """
+    base_volatility = 0.06 if is_live else 0.03
+
+    # volatilidade sobe no final da partida
+    if is_live and event_minute > 75:
+        base_volatility *= 1.5
+
+    # volatilidade proporcional à odd (odds altas oscilam mais)
+    volatility = base_volatility * math.log(current + 1)
+
+    # variação aleatória com tendência de reversão à média
+    delta = random.gauss(0, volatility)
+
+    # limitar variação
+    delta = max(-0.20, min(0.20, delta))
+
+    new_value = round(current + delta, 2)
+
+    # odds nunca abaixo de 1.01 nem acima de 100
+    return max(1.01, min(100.0, new_value))
+
+
+def generate_correlated_odds(market_odds: list[dict], is_live: bool, minute: int) -> list[dict]:
+    """
+    Varia as odds de um mercado mantendo a margem da casa (~5-8%).
+    Se uma odd cai, as outras sobem proporcionalmente.
+    """
+    updated = []
+    for odd in market_odds:
+        new_value = fluctuate_odd(odd["value"], is_live, minute)
+        updated.append({**odd, "value": new_value, "prev_value": odd["value"]})
+
+    # normalizar para manter margem da casa
+    total_prob = sum(1 / o["value"] for o in updated)
+    margin = 1.07  # 7% de margem
+    if total_prob > 0:
+        factor = (total_prob * margin) / total_prob
+        for o in updated:
+            o["value"] = round(o["value"] / factor, 2)
+
+    return updated
+```
+
+### Job de Flutuação (APScheduler)
+
+```python
+# app/scheduler/odds_fluctuation.py
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+scheduler = AsyncIOScheduler()
+
+@scheduler.scheduled_job("interval", seconds=5)
+async def update_live_odds():
+    """A cada 5 segundos, varia odds de todas as partidas ao vivo e publica via Redis."""
+    events = await event_repository.get_live_events()
+    for event in events:
+        for market in event.markets:
+            updated_odds = generate_correlated_odds(market.odds, is_live=True, minute=event.minute)
+            await odd_repository.bulk_update(updated_odds)
+
+        # publicar no canal Redis para broadcast WebSocket
+        payload = await build_ws_payload(event)
+        await redis.publish(f"event:{event.enet_code}", json.dumps(payload))
+```
+
+### Lock de Cotação na Aposta
+
+```python
+# app/services/bet_service.py
+
+async def place_bet(user_id: str, bet_data: BetRequest, db: AsyncSession):
+    total_quotation = 1.0
+    items = []
+
+    for selection in bet_data.sports:
+        # busca a odd ATUAL no momento do clique
+        odd = await odd_repository.get_by_odd_id(db, selection.odd_id)
+
+        if not odd or not odd.active:
+            raise BetError("Odd indisponível")
+
+        # verifica se a odd mudou desde que o usuário visualizou
+        if not bet_data.accept_all_changes:
+            if odd.value < selection.quotation and not bet_data.only_accept_high:
+                raise BetError("Odd diminuiu", code=1050)
+
+        # TRAVA a cotação no momento da aposta
+        locked_quotation = odd.value
+        total_quotation *= locked_quotation
+
+        items.append(BetItem(
+            event_id=...,
+            enet_code=selection.enet_code,
+            market_id=selection.market_id,
+            odd_id=selection.odd_id,
+            option_id=selection.option_id,
+            quotation=locked_quotation,      # cotação travada aqui
+            is_live=selection.is_live,
+            specifier=selection.specifier,
+            status="OPENED"
+        ))
+
+    return_value = round(bet_data.value * total_quotation, 2)
+
+    bet = Bet(
+        user_id=user_id,
+        value=bet_data.value,
+        return_value=return_value,
+        extracted_quotation=round(total_quotation, 4),
+        status="OPENED",
+        ...
+    )
+    # debita saldo do usuário
+    await user_repository.debit(db, user_id, bet_data.value, bet_data.spend_from)
+    ...
+```
+
+---
+
+## Geração de Resultados
+
+```python
+# app/scheduler/result_generator.py
+
+async def settle_event(event_id: str):
+    """
+    Ao fim da partida, gera resultado aleatório ponderado
+    pelas odds (odds baixas = time favorito) e liquida apostas.
+    """
+    event = await event_repository.get(event_id)
+
+    # resultado ponderado pelas odds do mercado 1x2
+    main_market = await market_repository.get_by_market_id(event_id, market_id=1)
+    odds_1x2 = {o.option_id: o.value for o in main_market.odds}
+
+    # probabilidade implícita (inverso das odds)
+    probs = {k: 1/v for k, v in odds_1x2.items()}
+    total = sum(probs.values())
+    norm = {k: v/total for k, v in probs.items()}
+
+    # sorteia resultado
+    outcome = random.choices(list(norm.keys()), weights=list(norm.values()))[0]
+
+    # gera placar coerente com o resultado
+    home_goals, away_goals = generate_score(outcome)
+
+    await event_repository.finish(event_id, home_goals, away_goals)
+    await settle_all_bets(event_id, home_goals, away_goals)
+
+
+async def settle_all_bets(event_id: str, home: int, away: int):
+    """Percorre todos os bet_items do evento e marca WINS ou LOST."""
+    items = await bet_item_repository.get_by_event(event_id)
+    for item in items:
+        result = evaluate_outcome(item.market_id, item.option_id, item.specifier, home, away)
+        item.status = "WINS" if result else "LOST"
+
+    # recalcula cada aposta: se todos os items WINS → aposta WINS, paga retorno
+    await recalculate_bets(event_id)
+
+
+def evaluate_outcome(market_id: int, option_id: str, specifier: dict, home: int, away: int) -> bool:
+    """Avalia se uma seleção ganhou baseado no resultado."""
+    if market_id == 1:  # 1x2
+        if home > away: return option_id == "1"
+        if home == away: return option_id == "X"
+        return option_id == "2"
+
+    if market_id == 5:  # Over/Under
+        total = float(specifier.get("total", 2.5))
+        goals = home + away
+        if option_id == "over": return goals > total
+        return goals < total
+
+    if market_id == 3:  # BTTS
+        scored = home > 0 and away > 0
+        return (option_id == "yes") == scored
+
+    if market_id == 10:  # Double chance
+        if option_id == "1X": return home >= away
+        if option_id == "X2": return away >= home
+        if option_id == "12": return home != away
+
+    # ... demais mercados
+    return False
+```
+
+---
+
+## WebSocket — Eventos ao Vivo
+
+### Endpoint
+```
+ws://localhost:8000/ws/events_sports_markets
+```
+
+### Fluxo
+```
+Cliente → {"action": "subscribe", "events": [{"enet_code": "sr:match:12345"}]}
+Servidor → stream de updates do evento a cada 5s
+Cliente → {"action": "delete", "enet_code": "sr:match:12345"}
+```
+
+### ConnectionManager
+```python
+# app/websocket/manager.py
+
+class ConnectionManager:
+    def __init__(self):
+        self.active: dict[str, list[WebSocket]] = {}   # enet_code → [ws]
+
+    async def subscribe(self, ws: WebSocket, enet_code: str):
+        self.active.setdefault(enet_code, []).append(ws)
+
+    async def broadcast(self, enet_code: str, data: str):
+        for ws in self.active.get(enet_code, []):
+            await ws.send_text(data)
+
+    async def unsubscribe(self, ws: WebSocket, enet_code: str):
+        self.active.get(enet_code, []).remove(ws)
+```
+
+O Redis faz o Pub/Sub entre workers (quando há múltiplos Uvicorn workers):
+```
+Scheduler → redis.publish("event:sr:match:12345", payload)
+Worker A  → redis.subscribe → broadcast para seus WebSockets
+Worker B  → redis.subscribe → broadcast para seus WebSockets
+```
+
+---
+
+## Rotas HTTP
+
+### Auth
+| Método | Rota | Auth |
+|---|---|---|
+| POST | `/auth/login` | — |
+| GET | `/user/me` | Bearer |
+
+### Cliente
+| Método | Rota | Auth |
+|---|---|---|
+| POST | `/client` | — |
+| PUT | `/client` | Bearer |
+| PUT | `/client/me` | Bearer |
+| POST | `/client/signup/firststep` | — |
+| PUT | `/client/check-email-confirmation-code` | — |
+| POST | `/client/forgot_password` | — |
+| POST | `/client/password` | — |
+| GET | `/client/status-email-confirmation` | Bearer |
+| PUT | `/client/break-period` | Bearer |
+| PUT | `/client/self-exclusion` | Bearer |
+| PUT | `/client/update-email` | Bearer |
+
+### Apostas
+| Método | Rota | Auth |
+|---|---|---|
+| POST | `/bet` | Bearer |
+| GET | `/bet` | Bearer |
+| GET | `/bet/{id}` | Bearer |
+| PUT | `/bet/{id}/cashout` | Bearer |
+
+### Financeiro
+| Método | Rota | Auth |
+|---|---|---|
+| GET | `/deposit` | Bearer |
+| POST | `/deposit` | Bearer |
+| POST | `/check-withdrawals` | Bearer |
+| POST | `/cashout` | Bearer |
+| GET | `/deposit-welcome-verification` | Bearer |
+
+### Casino
+| Método | Rota | Auth |
+|---|---|---|
+| GET | `/casino/games_type` | — |
+| GET | `/casino/games?type=` | — |
+| POST | `/pragmatic/game-url` | Bearer |
+
+### Promoções / Notificações / Conteúdo
+| Método | Rota | Auth |
+|---|---|---|
+| GET | `/general-promotion/notifications` | — |
+| GET | `/general-promotion/jackpot-games` | — |
+| POST | `/promo-code/activate-coupon` | Bearer |
+| GET | `/notification` | Bearer |
+| PUT | `/notification` | Bearer |
+| GET | `/client-notification/messages` | Bearer |
+| GET | `/client-notification/messages/{id}` | Bearer |
+| GET | `/rules/list` | — |
+| GET | `/rules/{id}` | — |
+| GET | `/sport/open` | — |
+
+### WebSocket
+| Protocolo | Rota |
+|---|---|
+| WS | `/ws/events_sports_markets` |
+
+---
+
+## CORS + Auth
+
+```python
+# app/main.py
+app.add_middleware(CORSMiddleware,
+    allow_origins=["http://localhost:3000", "https://rosabet.com.br"],
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# app/core/dependencies.py
+async def get_current_user(token = Depends(oauth2_scheme), db = Depends(get_db)):
+    user_id = verify_token(token)
+    return await user_repository.get_by_id(db, user_id)
+```
+
+---
+
+## .env
+```env
+DATABASE_URL=postgresql+asyncpg://rosabet:senha@localhost:5432/rosabet
+SECRET_KEY=sua-chave-secreta-longa-aqui
+REDIS_URL=redis://localhost:6379
+ENVIRONMENT=development
+ODDS_UPDATE_INTERVAL_SECONDS=5
+RESULT_DELAY_MINUTES=90
+```
+
+---
+
+## Docker Compose
+```yaml
+version: "3.9"
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on: [db, redis]
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: rosabet
+      POSTGRES_USER: rosabet
+      POSTGRES_PASSWORD: senha
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+```
+
+---
+
+## Migração: Next.js Fake API → FastAPI
+
+### O que existe hoje em `src/app/api/`
+
+São 35 arquivos `route.ts` que simulam o backend. Eles precisam ser substituídos rota por rota. A migração pode ser feita gradualmente sem quebrar nada.
+
+### Passo a passo
+
+**1. Suba o FastAPI localmente**
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+**2. Troque a variável de ambiente**
+```env
+# .env.local do Next.js
+NEXT_PUBLIC_BASE_URL=http://localhost:8000
+```
+
+**3. Apague os arquivos de rota fake do Next.js em lotes**
+
+Ordem segura de remoção (do mais simples ao mais crítico):
+
+```bash
+# Lote 1 — conteúdo estático (sem estado)
+rm -rf src/app/api/rules
+rm -rf src/app/api/general-promotion
+rm -rf src/app/api/promo-code
+rm -rf src/app/api/sport
+
+# Lote 2 — casino
+rm -rf src/app/api/casino
+rm -rf src/app/api/pragmatic
+
+# Lote 3 — notificações
+rm -rf src/app/api/notification
+rm -rf src/app/api/client-notification
+
+# Lote 4 — financeiro
+rm -rf src/app/api/deposit
+rm -rf src/app/api/cashout
+rm -rf src/app/api/check-withdrawals
+rm -rf src/app/api/deposit-welcome-verification
+
+# Lote 5 — apostas
+rm -rf src/app/api/bet
+
+# Lote 6 — autenticação (último, mais crítico)
+rm -rf src/app/api/auth
+rm -rf src/app/api/user
+rm -rf src/app/api/client
+```
+
+**4. Apague o arquivo de dados fake**
+```bash
+rm -rf src/app/api/_data
+```
+
+**5. Verifique se não sobrou nenhuma rota**
+```bash
+ls src/app/api/
+# deve estar vazio
+```
+
+**6. Teste cada fluxo no browser**
+- Login com demo@rosabet.com
+- Ver saldo na home
+- Navegar no cassino
+- Ver apostas
+- Simular depósito PIX
+
+### Atenção: WebSocket
+
+O WebSocket hoje usa `src/service/socket.ts` com URL via env var. Certifique-se que:
+```env
+NEXT_PUBLIC_SOCKET_URL=ws://localhost:8000
+```
+E que o FastAPI aceita conexões no caminho `/ws/events_sports_markets`.
+
+---
+
+## Instalação
+
+```bash
+pip install fastapi uvicorn[standard] sqlalchemy[asyncio] asyncpg alembic \
+            python-jose[cryptography] passlib[bcrypt] pydantic-settings \
+            redis apscheduler python-multipart
+
+alembic init alembic
+alembic revision --autogenerate -m "init"
+alembic upgrade head
+
+uvicorn app.main:app --reload
+```
