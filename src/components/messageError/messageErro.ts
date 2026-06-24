@@ -417,7 +417,7 @@ export const messagesErrors: { [key: number]: string } = {
   9023: "Não é possível continuar, cliente não possui afiliação.",
   9024: "Não é possível continuar, parceiro com o mesmo nome já registrado.",
   9025: "Não é possível retirar, data do depósito de bônus inválida.",
-  9026: "Loteria Marjo ausente.",
+  9026: "Loteria RosaBet ausente.",
   9027: "Nome de faturamento inválido.",
   9028: "CVV do cartão inválido.",
   9029: "Número do cartão inválido.",
