@@ -1,62 +1,82 @@
-<p align="center">
-  <a href="#requisitos">REQUISITOS</a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;
-  <a href="#-usando">INSTALAÇÃO</a>&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;
-  <a href="#tecnologias-usadas">TECNOLOGIAS</a>&nbsp;&nbsp;&nbsp;
-</p>
+# RosaBet — Frontend
 
-## ⚠️ REQUISITOS
+> Plataforma de apostas esportivas e cassino online.
 
-- Use a versão do node LTS `20.13.1`
+---
+
+<!-- GIF DA PLATAFORMA -->
+
+---
+
+## O que é
+
+RosaBet é uma plataforma completa de apostas esportivas e cassino. O frontend foi construído em Next.js 14 e consome uma API FastAPI em tempo real, incluindo odds ao vivo via WebSocket.
+
+Funcionalidades principais:
+
+- Login, cadastro e gerenciamento de conta
+- Apostas esportivas com odds em tempo real (WebSocket)
+- Cassino com slots, roleta, ao vivo, bingo e outros
+- Depósito via PIX simulado com bônus de boas-vindas
+- Histórico de apostas e extrato financeiro
+
+---
+
+## Como rodar
+
+**Pré-requisito:** Node.js 20.13.1 (use `nvm use 20.13.1`)
+
 ```bash
-nvm install 20.13.1
-nvm use 20.13.1
-```
-
-- Use a versão do NextJS `14.2.3`
-```bash
-npm install next@14.2.3
-```
-
-- Use a versão do ReactJS `18.3.1`
-```bash
-npm install react@18.3.1 react-dom@18.3.1
-```
-
-## ⚙️ USANDO
-
-- Clone ou Baixe este repositório;
-
-- Abra-o no terminal;
-
-- Execute o projeto `Produção`:
-```bash
-npm run build
-npm run start
-```
-
-- Execute o projeto `Desenvolvimento`:
-```bash
+npm install
 npm run dev
 ```
 
-- #### Obs: Você também pode usar o pnpm;
+O frontend sobe em `http://localhost:3000`.
 
-- #### Obs2: É preciso assegurar que seu .env (na raiz do projeto) esteja sempre com as configurações corretas.
-- #### Obs3: O projeto roda na porta `3000`
-Exemplo: `baseURL: 'http://localhost:3000'`
+Certifique-se de que o backend FastAPI está rodando em `http://localhost:8000` — veja o [README do backend](../BE-RosaBet/README.md).
 
-## 📝 TECNOLOGIAS USADAS
+---
 
-### O projeto foi desenvolvido com base nas seguintes tecnologias:
+## Estrutura de pastas
 
-- [Typescript](https://www.typescriptlang.org/)
-- [NextJS](https://nextjs.org/blog/next-14)
-- [Styled Component](https://styled-components.com/)
-- [Lodash](https://lodash.com/)
+```
+RosaBet/
+├── src/
+│   ├── app/                        # Rotas do Next.js (App Router)
+│   │   ├── (auth)/                 # Páginas de login e cadastro
+│   │   ├── (private)/              # Páginas protegidas (aposta, perfil, cassino)
+│   │   └── (public)/               # Páginas abertas (home, esportes)
+│   │
+│   ├── components/                 # Componentes reutilizáveis
+│   ├── context/                    # Contextos React (auth, betslip, user)
+│   ├── hooks/                      # Custom hooks (useGame, useBetslip, etc.)
+│   ├── service/                    # Clientes HTTP e WebSocket
+│   └── types/                      # Tipos TypeScript globais
+│
+├── public/                         # Assets estáticos
+└── .env.local                      # Variáveis de ambiente (não vai pro git)
+```
 
-<!--
-  modal deposit
-  depositar fluxo completo
-  calendar
-  hilights
- -->
+---
+
+## Variáveis de ambiente
+
+Crie um `.env.local` na raiz:
+
+```env
+NEXT_PUBLIC_BASE_URL=http://localhost:8000
+NEXT_PUBLIC_SOCKET_URL=ws://localhost:8000
+NEXT_WEBSITE_URL=http://localhost:3000/
+```
+
+---
+
+## Stack
+
+| Tecnologia | Versão |
+|---|---|
+| Next.js | 14.2.3 |
+| React | 18.3.1 |
+| TypeScript | — |
+| Styled Components | — |
+| Node.js | 20.13.1 |
