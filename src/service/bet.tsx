@@ -3,7 +3,7 @@ import { CuponsProps } from "@/interfaces/cupons";
 import { BetCorrectScoreProps, BetJackpotProps } from "@/interfaces/promotion";
 // https://nextjs.org/docs/app/building-your-application/caching#router-cache
 
-const urlRoute = "/v2/bet";
+const urlRoute = "/bet";
 
 const betCoupon = async (data: CuponsProps) => {
   const response = await fetcher({

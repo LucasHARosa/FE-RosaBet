@@ -47,7 +47,7 @@ export function CuponsProvider({ children }: { children: React.ReactNode }) {
   const addSportCupons = (event: SportsCupons) => {
     if (cupons.length >= 12) return;
 
-    const existMarket = _.find(cupons, { hash: event.hash });
+    const existMarket = _.find(cupons, (c) => c.hash === event.hash && c.enet_code === event.enet_code);
     if (existMarket) {
       removeSportCupons(existMarket);
       return;
@@ -142,8 +142,12 @@ export function CuponsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (itensStorage !== false) {
-      const storageCupons = getStorage("cupons");
-      if (storageCupons) setCupons(storageCupons);
+      const storageCupons = getStorage("cupons") as SportsCupons[] | null;
+      if (storageCupons) {
+        // live events change too fast to restore from storage safely
+        const validCupons = storageCupons.filter((c) => !c.is_live);
+        if (validCupons.length > 0) setCupons(validCupons);
+      }
       setItensStorage(false);
       return;
     }

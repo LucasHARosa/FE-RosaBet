@@ -21,7 +21,7 @@ export default function useOddButton({ market, game }: ButtonOddProps) {
 
   const { addSportCupons, cupons, oddAvailable } = useContext(CuponsContext);
 
-  const OddSelected = _.find(cupons, (sport) => sport.hash === market.hash);
+  const OddSelected = _.find(cupons, (sport) => sport.hash === market.hash && sport.enet_code === game.enet_code);
 
   const OddAvailable = useMemo(() => {
     return oddAvailable(market, game) && !isConnectionDown;
