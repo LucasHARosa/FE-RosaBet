@@ -16,7 +16,6 @@ import { TiHome } from "react-icons/ti";
 import getImageSport from "@/utils/sports-icons";
 import { RouterProps } from "@/interfaces/sideBar";
 import getImageCountry from "@/utils/mapped-country";
-import { TbMessageQuestion } from "react-icons/tb";
 import { useTheme } from "@/contexts/ThemeContext";
 import { IoSunny } from "react-icons/io5";
 
@@ -191,12 +190,6 @@ export default function useSidebar() {
       
       icon: IoSunny,
       redirect: "toggleTheme",
-      isView: true,
-    },
-    {
-      title: "Suporte",
-      redirect: "/support",
-      icon: TbMessageQuestion,
       isView: true,
     },
   ] as RouterProps[];

@@ -169,7 +169,6 @@ export default function Layout({
             LEGAL
           </Text>
           <GroupCard>
-            <Card.Route handleTab={handleTab} activeTab={tabActiveMemo === "terms"} iconName="security" route="/profile/terms" title="Privacidade & Termos" />
             <Card.Route handleTab={handleTab} activeTab={tabActiveMemo === "break"} iconName="pause" route="/profile/break" title="Período de Pausa" />
             <Card.Route handleTab={handleTab} activeTab={tabActiveMemo === "exclusion"} iconName="deleteLeft" route="/profile/exclusion" title="Exclusão de Conta" />
           </GroupCard>

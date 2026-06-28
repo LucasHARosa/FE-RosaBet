@@ -38,10 +38,9 @@ export const UserProvider = ({ children }: any) => {
 
   const handleUser = (data: UserI) => {
     setUser(data);
-    handleToken(data.token);
+    if (data.token) handleToken(data.token);
     setStorage("user", JSON.stringify(data));
     verifyEmail(data);
-    
   };
 
   const openLogin = () => {

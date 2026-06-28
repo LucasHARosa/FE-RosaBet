@@ -23,14 +23,18 @@ export const getFormattedGameTime = ({ match_status, last_update, played_time }:
     formattedTime += `${quarterNumber} set `;
   }
 
-  if(!played_time) 
+  if(!played_time)
     return formattedTime;
+
+  // played_time without ":" (e.g. "22'", "1S 2-1") cannot be used for arithmetic — return as-is
+  if (!played_time.includes(':')) {
+    return played_time;
+  }
 
   const lastUpdate = new Date(last_update).getTime();
   const now: number = new Date().getTime();
   const diffInSeconds = Math.floor((now - lastUpdate) / 1000);
-  
-    
+
   const [minutes, seconds] = played_time.split(":").map(Number);
   const tInSeconds = (minutes * 60) + seconds;
 

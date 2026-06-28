@@ -17,11 +17,9 @@ import type { Metadata } from "next";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { ToastContainer } from "react-toastify";
 import { Space_Grotesk } from "next/font/google";
-import Script from "next/script";
 import Head from "next/head";
 import { StorageProvider } from "@/contexts/StorageContext";
 import { getLocale, getMessages } from 'next-intl/server';
-import { loadSportradarWidget } from "@/utils/scripts/sportradarWidget";
 
 const spaceGrotesk = Space_Grotesk({ subsets: ["latin"] });
 
@@ -88,13 +86,6 @@ export default async function RootLayout({
             </ThemeProvider>
           </StorageProvider>
         </NextIntlClientProvider>
-        <Script
-          id="sportradar-widget"
-          strategy="afterInteractive"
-          dangerouslySetInnerHTML={{
-            __html: loadSportradarWidget(),
-          }}
-        />
       </body>
     </html>
   );

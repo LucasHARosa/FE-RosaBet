@@ -8,10 +8,6 @@ import notifyPopup from "@/utils/toast";
 import { getMappers } from "@/utils/markets";
 import { Button } from "@/components/common/button";
 import getImageMarket from "@/utils/markets-icons";
-import { GiSoccerKick } from "react-icons/gi";
-import CardYellow from "@/assets/icons/card-yellow.svg";
-import CardRed from "@/assets/icons/card-red.svg";
-import Image from "next/image";
 import { mappersNames } from "@/utils/mapped-markets";
 import { JSX } from "react/jsx-runtime";
 import { getFormattedGameTime } from "@/utils/game/timestampGame";
@@ -21,13 +17,11 @@ export default function useGame(enet_code?: string) {
   const [marketsData, setMarketsData] = useState<GameProps>({} as GameProps);
   const [isSticky, setIsSticky] = useState(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [timer, setTimer] = useState<any>();
   const router = useRouter();
-  const [statsList, setStatsList] = useState<{ icon: JSX.Element; text: JSX.Element; }[]>([]);
+  const statsList: { icon: JSX.Element; text: JSX.Element; }[] = [];
   const [timerGame, setTimerGame] = useState(marketsData.played_time);
 
   const { isMobile } = useWindow();
-  const refObserver = useRef<MutationObserver>();
   const gameFormattedMarkets = useRef<any>(null);
   const wsRef = useRef<any>();
 
@@ -45,60 +39,8 @@ export default function useGame(enet_code?: string) {
     }
   }, [marketsData.played_time, marketsData.is_live, marketsData.srLastDate, marketsData.match_status]);
 
-  const updateStats = () => {
-    const clockValue = clock();
-    const yellowCards = cardsYellow();
-    const redCards = cardsRed();
-    const cornersCount = corners();
-
-    setTimer(clockValue);
-    setStatsList([
-      { icon: <Image src={CardYellow} width={16} height={16} alt="yellow" />, text: <span>{yellowCards.home} - {yellowCards.away}</span> },
-      { icon: <Image src={CardRed} width={16} height={16} alt="red" />, text: <span>{redCards.home} - {redCards.away}</span> },
-      { icon: <GiSoccerKick size={18} />, text: <span>{cornersCount.home} - {cornersCount.away}</span> },
-    ]);
-  };
-
-  const clock = () => {
-    const clockElement = document.querySelector(".sr-lmt-plus-scb__mid");
-    return clockElement?.innerHTML;
-  };
-
-  const cardsYellow = () => {
-    const cardsYellowElements = document.querySelectorAll(".srm-yellow");
-    return {
-      home: cardsYellowElements[0]?.innerHTML || "0",
-      away: cardsYellowElements[1]?.innerHTML || "0"
-    };
-  };
-
-  const cardsRed = () => {
-    const cardsRedElements = document.querySelectorAll(".srm-red");
-    return {
-      home: cardsRedElements[0]?.innerHTML || "0",
-      away: cardsRedElements[1]?.innerHTML || "0"
-    };
-  };
-
-  const corners = () => {
-    const cornersElements = document.querySelectorAll(".sr-lmt-plus-0-hor-chart__display-value");
-    return {
-      home: cornersElements[0]?.innerHTML || "0",
-      away: cornersElements[1]?.innerHTML || "0"
-    };
-  };
-
   useEffect(() => {
     if (!enet_code) return;
-    (window as any).SIR("addWidget", ".sr-widget-1", "match.lmtPlus", {
-      streamToggle: "onPitchButton",
-      activeStreamToggle: "stream",
-      layout: "topdown",
-      scoreboard: "extended",
-      scoreboardLargeJerseys: true,
-      goalBannerCustomBgColor: "rgba(246,79,109,0.08)",
-      matchId: enet_code,
-    });
 
     try {
       const ws = createWebSocket("events_sports_markets");
@@ -136,45 +78,6 @@ export default function useGame(enet_code?: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if(marketsData.__t !== "Soccer") return;
-    const observer = new MutationObserver(() => {
-      updateStats();
-    });
-    refObserver.current = observer;
-
-    const observeElements = () => {
-      const clockElement = document.querySelector(".sr-lmt-plus-scb__mid");
-      const cardsYellowElements = document.querySelectorAll(".srm-yellow");
-      const cardsRedElements = document.querySelectorAll(".srm-red");
-      const cornersElements = document.querySelectorAll(".sr-lmt-plus-0-hor-chart__display-value");
-
-      if (clockElement) {
-        console.log("Observing clockElement");
-        observer.observe(clockElement, { childList: true, subtree: true, characterData: true });
-      }
-      cardsYellowElements.forEach((el, index) => {
-        console.log(`Observing cardsYellowElement ${index + 1}`);
-        observer.observe(el, { childList: true, subtree: true, characterData: true });
-      });
-      cardsRedElements.forEach((el, index) => {
-        console.log(`Observing cardsRedElement ${index + 1}`);
-        observer.observe(el, { childList: true, subtree: true, characterData: true });
-      });
-      cornersElements.forEach((el, index) => {
-        console.log(`Observing cornersElement ${index + 1}`);
-        observer.observe(el, { childList: true, subtree: true, characterData: true });
-      });
-
-      updateStats();
-    };
-
-    setTimeout(() => {
-      observeElements();
-    } , 1500);
-  
-    return () => observer.disconnect();
-  }, []);
 
   const items = marketsData.markets && marketsData.markets.length > 1
     ?
@@ -308,7 +211,6 @@ export default function useGame(enet_code?: string) {
     isMobile,
     items,
     bannerGame,
-    timer,
     statsList,
     onScroll,
     timerGame

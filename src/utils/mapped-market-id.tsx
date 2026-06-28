@@ -11,18 +11,17 @@ export const translateOdd = (marketId: string, oddId: string, oddHash: string, g
   const translateMarket = marketData.market_descriptions.market.find((market) => market.id === marketId);
   if(!translateMarket) return 'Market not found';
   const market = translateMarket.outcomes?.outcome;
-  console.log(market);
   const data = market && Array.isArray(market);
   if (!data) return 'Odd market not mapped';
-  
-  const mkt = (market as { id: string; name: string; }[])
-      .filter((i: any) => i.id === oddId)[0].name
+
+  const found = (market as { id: string; name: string; }[]).find((i: any) => i.id === oddId);
+  if (!found) return oddId || 'Odd not found';
+
+  const mkt = found.name
       .replaceAll("{$competitor1}", game.sport.home_team)
       .replaceAll("{$competitor2}", game.sport.out_team);
 
-  if (!mkt) return 'Odd not found';
-  
-  return replacePlaceholders(mkt, oddHash);;
+  return replacePlaceholders(mkt, oddHash);
 }
 
 const replacePlaceholders = (b: string, c: string) => {
@@ -39,23 +38,32 @@ const replacePlaceholders = (b: string, c: string) => {
 }
 
 export const translateMarketAndOption = (hash: string, home_team: string, out_team: string) => {
-  const matchM = hash.match(/m-(\d+)/);
-  const matchO = hash.match(/o-(\d+)/);
+  // Backend sends hash as "{market_id}::{option_id}", e.g. "1::1", "1::X", "5::total=2.5:over"
+  const sepIndex = hash.indexOf('::');
+  const marketId = sepIndex >= 0 ? hash.slice(0, sepIndex) : hash;
+  const optionPart = sepIndex >= 0 ? hash.slice(sepIndex + 2) : null;
 
-  const marketId = matchM ? matchM[1] : 'Not Found';
-  const optionId = matchO ? matchO[1] : null;
+  // For specifier format "total=2.5:over", the option_id is after the last ":"
+  const optionId = optionPart
+    ? (optionPart.includes(':') ? optionPart.split(':').pop()! : optionPart)
+    : null;
 
-  const translateMarket = marketData.market_descriptions.market.find((market) => market.id === marketId);
+  const foundMarket = marketData.market_descriptions.market.find((market) => market.id === marketId);
+  const market = foundMarket?.outcomes?.outcome;
 
-  const market = translateMarket?.outcomes?.outcome;
-
-  const mkt = (market as { id: string; name: string; }[])
-      .filter((i: any) => i.id === optionId)[0].name
-      .replaceAll("{$competitor1}", home_team)
-      .replaceAll("{$competitor2}", out_team);
+  let oddName = optionId || 'Indefinido';
+  if (market && Array.isArray(market) && optionId) {
+    const found = (market as { id: string; name: string; }[]).find((i: any) => i.id === optionId);
+    if (found) {
+      oddName = found.name
+        .replaceAll("{$competitor1}", home_team)
+        .replaceAll("{$competitor2}", out_team);
+      oddName = replacePlaceholders(oddName, hash);
+    }
+  }
 
   return {
-    market: translateMarket?.name || 'Market not found',
-    odd: replacePlaceholders(mkt, hash) || 'Odd market not mapped'
+    market: foundMarket?.name || 'Market not found',
+    odd: oddName,
   }
 };
